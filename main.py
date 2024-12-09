@@ -1,9 +1,8 @@
 import requests
 from neo4j import GraphDatabase
 from loguru import logger
-import time, os
+import os
 from dotenv import load_dotenv
-import argparse
 
 # Логирование
 logger.add("debug.log", level="DEBUG")
@@ -50,25 +49,25 @@ class Neo4jDB:
     def save_group(self, group):
         query = """
         MERGE (g:Group {id: $id})
-        SET g.name = $name, g.screen_name = $screen_name
+        SET g.name = $name, g.screen_name = $screen_name, g.count = $count
         """
         with self.driver.session() as session:
             session.run(query, group)
 
-    def save_relationship(self, user_id, target_id, relationship):
+    def save_relationship(self, user_id, target_id):
         query = f"""
         MATCH (u:User {{id: $user_id}})
         MATCH (t:User {{id: $target_id}})
-        MERGE (u)-[:{relationship}]->(t)
+        MERGE (u)-[:FOLLOW]->(t)
         """
         with self.driver.session() as session:
             session.run(query, {"user_id": user_id, "target_id": target_id})
 
-    def save_subscribe(self, user_id, target_id, relationship):
+    def save_subscribe(self, user_id, target_id):
         query = f"""
         MATCH (u:User {{id: $user_id}})
         MATCH (g:Group {{id: $target_id}})
-        MERGE (u)-[:{relationship}]->(g)
+        MERGE (u)-[:SUBSCRIBE]->(g)
         """
         with self.driver.session() as session:
             session.run(query, {"user_id": user_id, "target_id": target_id})
@@ -87,7 +86,7 @@ class Neo4jDB:
 
     def get_top_users_by_followers(self, top_n=5):
         query = f"""
-        MATCH (u:User)-[:FOLLOWED_BY]->(f:User)
+        MATCH (u:User)-[:FOLLOW]->(f:User)
         WITH u, count(f) AS followers_count
         ORDER BY followers_count DESC
         LIMIT {top_n}
@@ -99,7 +98,7 @@ class Neo4jDB:
 
     def get_top_groups_by_popularity(self, top_n=5):
         query = f"""
-        MATCH (g:Group)<-[:SUBSCRIBES_TO]-(u:User)
+        MATCH (g:Group)<-[:SUBSCRIBE]-(u:User)
         WITH g, count(u) AS subscribers_count
         ORDER BY subscribers_count DESC
         LIMIT {top_n}
@@ -138,7 +137,7 @@ def get_user_followers(user_id):
     return followers.get("items", []) if followers else []
 
 def get_user_groups(user_id):
-    groups = vk_request("groups.get", {"user_id": user_id, "extended": 1, "fields": "name,screen_name", "count": 100})
+    groups = vk_request("groups.get", {"user_id": user_id, "extended": 1, "fields": "name,screen_name,members_count", "count": 100})
     return groups.get("items", []) if groups else []
 
 def get_user_info(user_ids):
@@ -146,7 +145,7 @@ def get_user_info(user_ids):
     return users if users else []
 
 
-def collect_data_recursive(user_id, db, depth=2, current_depth=0, processed_users=None):
+def collect_data_recursive(user_id, db, current_depth, depth, processed_users=None):
     """
     Рекурсивный сбор данных о пользователях и их связях.
 
@@ -162,7 +161,7 @@ def collect_data_recursive(user_id, db, depth=2, current_depth=0, processed_user
         return
 
     processed_users.add(user_id)
-
+    logger.info(f"Обрабатываем пользователя {user_id} на уровне {current_depth}")
     # Получение информации о пользователе
     user_info = get_user_info([user_id])
     if user_info:
@@ -173,91 +172,54 @@ def collect_data_recursive(user_id, db, depth=2, current_depth=0, processed_user
             "sex": user_info[0].get("sex", 0),
             "home_town": user_info[0].get("home_town", "")
         }
+        logger.info(f'Добавляем пользователя {user['id']}')
         db.save_user(user)
 
     followers = get_user_followers(user_id)
     for follower_id in followers:
         follower_info = get_user_info([follower_id])
         if follower_info:
-            user = {
+            follower = {
                 "id": follower_info[0]["id"],
                 "screen_name": follower_info[0].get("screen_name", ""),
                 "name": f"{follower_info[0].get('first_name', '')} {follower_info[0].get('last_name', '')}",
                 "sex": follower_info[0].get("sex", 0),
                 "home_town": follower_info[0].get("home_town", "")
             }
-            db.save_user(user)
-        db.save_relationship(user_id, follower_id, "FOLLOW")
-        collect_data_recursive(follower_id, db, depth, current_depth + 1, processed_users)
+            db.save_user(follower)
+            db.save_relationship(user_id, follower['id'])
+        collect_data_recursive(follower_id, db, current_depth + 1, depth, processed_users)
 
+    processed_groups = set()  # Набор для хранения уникальных ID групп
     groups = get_user_groups(user_id)
+
     for group in groups:
-        group_data = {
-            "id": group["id"],
-            "name": group.get("name", ""),
-            "screen_name": group.get("screen_name", "")
-        }
-        db.save_group(group_data)
-        db.save_subscribe(user_id, group["id"], "SUBSCRIBE")
+        group_id = group["id"]
+        if group_id not in processed_groups:  # Проверяем, была ли уже обработана группа
+            group_data = {
+                "id": group_id,
+                "name": group.get("name", ""),
+                "screen_name": group.get("screen_name", ""),
+                "count": group.get("members_count", 0)
+            }
+            logger.info(f'Добавляем группу {group_data['id']}')
+            db.save_group(group_data)  # Сохраняем только уникальные группы
+            db.save_subscribe(user_id, group_id)
+            processed_groups.add(group_id)  # Добавляем ID группы в набор
 
-    logger.info(f"Processed user {user_id} at depth {current_depth}")
-
-def queries():
-    parser = argparse.ArgumentParser(description="Query Neo4j database")
-    parser.add_argument('--uri', required=True, help='URI for Neo4j')
-    parser.add_argument('--user', required=True, help='Username for Neo4j')
-    parser.add_argument('--password', required=True, help='Password for Neo4j')
-    parser.add_argument('--top_users', type=int, default=5, help='Top N users by followers')
-    parser.add_argument('--top_groups', type=int, default=5, help='Top N groups by popularity')
-    parser.add_argument('--fetch_users', action='store_true', help='Fetch all users')
-    parser.add_argument('--fetch_groups', action='store_true', help='Fetch all groups')
-    parser.add_argument('--fetch_followed_users', action='store_true', help='Fetch users who follow each other')
-
-    args = parser.parse_args()
-    db = Neo4jDB(args.uri, args.user, args.password)
-
-    if args.fetch_users:
-        users = db.get_all_users()
-        print("Все пользователи:")
-        for user in users:
-            print(user)
-
-    if args.fetch_groups:
-        groups = db.get_all_groups()
-        print("\nВсе группы:")
-        for group in groups:
-            print(group)
-
-    if args.fetch_followed_users:
-        followed_users = db.get_users_following_each_other()
-        print("\nПользователи которые следят за друг другом:")
-        for pair in followed_users:
-            print(pair)
-
-    if args.top_users:
-        top_users = db.get_top_users_by_followers(args.top_users)
-        print(f"\nТОП {args.top_users} пользователей по кол-ву подписчиков:")
-        for user in top_users:
-            print(user)
-
-    if args.top_groups:
-        top_groups = db.get_top_groups_by_popularity(args.top_groups)
-        print(f"\nТОП {args.top_groups} популярных групп:")
-        for group in top_groups:
-            print(group)
 
 if __name__ == "__main__":
 
     start_user_id = os.getenv('USER_ID')
     try:
         db = Neo4jDB(NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD)
-        collect_data_recursive(start_user_id, db, depth=2)
+        collect_data_recursive(start_user_id, db, current_depth=0, depth=2)
     except Exception as e:
         logger.error(f"Error occurred: {e}")
     finally:
         db.close()
         logger.info("Завершено.")
-        queries()
+
         
 
 
