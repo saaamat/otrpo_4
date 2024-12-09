@@ -110,7 +110,7 @@ class Neo4jDB:
 
     def get_users_following_each_other(self):
         query = """
-        MATCH (u1:User)-[:FOLLOWED_BY]->(u2:User)-[:FOLLOWED_BY]->(u1:User)
+        MATCH (u1:User)-[:FOLLOW]->(u2:User)-[:FOLLOW]->(u1:User)
         RETURN u1.id AS id1, u1.name AS name1, u2.id AS id2, u2.name AS name2
         """
         with self.driver.session() as session:
@@ -133,7 +133,7 @@ def vk_request(method, params):
 
 # Сбор данных
 def get_user_followers(user_id):
-    followers = vk_request("users.getFollowers", {"user_id": user_id, "count": 100})
+    followers = vk_request("users.getFollowers", {"user_id": user_id})
     return followers.get("items", []) if followers else []
 
 def get_user_groups(user_id):
@@ -145,6 +145,7 @@ def get_user_info(user_ids):
     return users if users else []
 
 
+# Добавление данных в БД
 def collect_data_recursive(user_id, db, current_depth, depth, processed_users=None):
     """
     Рекурсивный сбор данных о пользователях и их связях.
@@ -214,6 +215,12 @@ if __name__ == "__main__":
     try:
         db = Neo4jDB(NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD)
         collect_data_recursive(start_user_id, db, current_depth=0, depth=2)
+        # Запросы
+        #print(db.get_all_users())
+        #print(db.get_all_groups())
+        #print(db.get_top_users_by_followers())
+        #print(db.get_top_groups_by_popularity())
+        #print(db.get_users_following_each_other())
     except Exception as e:
         logger.error(f"Error occurred: {e}")
     finally:
