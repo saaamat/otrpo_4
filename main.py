@@ -20,17 +20,6 @@ NEO4J_PASSWORD = os.getenv('NEO_PASSWORD')
 driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD))
 
 
-def get_vk_user_info(user_id, access_token):
-    url = 'https://api.vk.com/method/users.get'
-    params = {
-        'user_ids': user_id,
-        'access_token': access_token,
-        'v': '5.131'
-    }
-    response = requests.get(url, params=params)
-    return response.json()
-
-
 class Neo4jDB:
     def __init__(self, uri, user, password):
         self.driver = GraphDatabase.driver(uri, auth=(user, password))
@@ -144,9 +133,8 @@ def get_user_info(user_ids):
     users = vk_request("users.get", {"user_ids": ",".join(map(str, user_ids)), "fields": "sex,city,home_town"})
     return users if users else []
 
-
 # Добавление данных в БД
-def collect_data_recursive(user_id, db, current_depth, depth, processed_users=None):
+def collect_data_recursive(user_id, db, current_depth, depth, processed_users=None, followers=None):
     """
     Рекурсивный сбор данных о пользователях и их связях.
 
@@ -167,7 +155,7 @@ def collect_data_recursive(user_id, db, current_depth, depth, processed_users=No
     user_info = get_user_info([user_id])
     if user_info:
         user = {
-            "id": user_info[0]["id"],
+            "id": user_info[0].get('id', 0),
             "screen_name": user_info[0].get("screen_name", ""),
             "name": f"{user_info[0].get('first_name', '')} {user_info[0].get('last_name', '')}",
             "sex": user_info[0].get("sex", 0),
@@ -175,39 +163,45 @@ def collect_data_recursive(user_id, db, current_depth, depth, processed_users=No
         }
         logger.info(f'Добавляем пользователя {user['id']}')
         db.save_user(user)
+        followers = get_user_followers(user_info[0].get('id'))
 
-    followers = get_user_followers(user_id)
-    for follower_id in followers:
-        follower_info = get_user_info([follower_id])
-        if follower_info:
-            follower = {
-                "id": follower_info[0]["id"],
-                "screen_name": follower_info[0].get("screen_name", ""),
-                "name": f"{follower_info[0].get('first_name', '')} {follower_info[0].get('last_name', '')}",
-                "sex": follower_info[0].get("sex", 0),
-                "home_town": follower_info[0].get("home_town", "")
-            }
-            db.save_user(follower)
-            db.save_relationship(user_id, follower['id'])
-        collect_data_recursive(follower_id, db, current_depth + 1, depth, processed_users)
+    foll = []
+    if followers:
+        for follower_id in followers:
+            follower_info = get_user_info([follower_id])
+            if follower_info:
+                follower = {
+                    "id": follower_info[0]["id"],
+                    "screen_name": follower_info[0].get("screen_name", ""),
+                    "name": f"{follower_info[0].get('first_name', '')} {follower_info[0].get('last_name', '')}",
+                    "sex": follower_info[0].get("sex", 0),
+                    "home_town": follower_info[0].get("home_town", "")
+                }
+                db.save_user(follower)
+                db.save_relationship(user_id, follower['id'])
+                foll.append(follower_id)
 
-    processed_groups = set()  # Набор для хранения уникальных ID групп
-    groups = get_user_groups(user_id)
 
-    for group in groups:
-        group_id = group["id"]
-        if group_id not in processed_groups:  # Проверяем, была ли уже обработана группа
-            group_data = {
-                "id": group_id,
-                "name": group.get("name", ""),
-                "screen_name": group.get("screen_name", ""),
-                "count": group.get("members_count", 0)
-            }
-            logger.info(f'Добавляем группу {group_data['id']}')
-            db.save_group(group_data)  # Сохраняем только уникальные группы
-            db.save_subscribe(user_id, group_id)
-            processed_groups.add(group_id)  # Добавляем ID группы в набор
 
+        processed_groups = set()  # Набор для хранения уникальных ID групп
+        groups = get_user_groups(user_id)
+
+        for group in groups:
+            group_id = group["id"]
+            if group_id not in processed_groups:  # Проверяем, была ли уже обработана группа
+                group_data = {
+                    "id": group_id,
+                    "name": group.get("name", ""),
+                    "screen_name": group.get("screen_name", ""),
+                    "count": group.get("members_count", 0)
+                }
+                logger.info(f'Добавляем группу {group_data['id']}')
+                db.save_group(group_data)  # Сохраняем только уникальные группы
+                db.save_subscribe(user_id, group_id)
+                processed_groups.add(group_id)  # Добавляем ID группы в набор
+
+        for f in foll:
+            collect_data_recursive(f, db, current_depth + 1, depth, processed_users)
 
 if __name__ == "__main__":
 
@@ -215,12 +209,7 @@ if __name__ == "__main__":
     try:
         db = Neo4jDB(NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD)
         collect_data_recursive(start_user_id, db, current_depth=0, depth=2)
-        # Запросы
-        #print(db.get_all_users())
-        #print(db.get_all_groups())
-        #print(db.get_top_users_by_followers())
-        #print(db.get_top_groups_by_popularity())
-        #print(db.get_users_following_each_other())
+
     except Exception as e:
         logger.error(f"Error occurred: {e}")
     finally:
