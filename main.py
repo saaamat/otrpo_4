@@ -4,7 +4,7 @@ from loguru import logger
 import os
 from dotenv import load_dotenv
 
-# Логирование
+
 logger.add("debug.log", level="DEBUG")
 
 load_dotenv()
